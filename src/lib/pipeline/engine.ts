@@ -7,7 +7,15 @@ import { runStage3C } from "./stage3c-social-mechanics";
 import { runStage4 } from "./stage4-blueprint-assembler";
 import { runStage5 } from "./stage5-runtime-prompt";
 import { runStage6 } from "./stage6-social-output";
-import type { PipelineInput, PipelineProgress } from "@/types";
+import type {
+  PipelineInput,
+  PipelineProgress,
+  IPProfile,
+  SceneGraph,
+  CharacterCard,
+  VisualScene,
+  SocialMechanics,
+} from "@/types";
 
 type ProgressCallback = (progress: PipelineProgress) => void;
 
@@ -15,18 +23,14 @@ export async function runPipeline(
   input: PipelineInput,
   onProgress: ProgressCallback
 ) {
-  const ipId = input.ip_name.toLowerCase().replace(/\s+/g, "_");
+  const ipId = input.ip_name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
 
   // Create directory structure
   await ensureDirectories(ipId);
 
-  // Stage 1: IP Parser
-  onProgress({
-    stage: "stage1",
-    status: "running",
-    message: "Analyzing IP...",
-  });
-  let ipProfile;
+  // ====== Stage 1: IP Parser ======
+  onProgress({ stage: "stage1", status: "running", message: "Analyzing IP..." });
+  let ipProfile: IPProfile;
   try {
     ipProfile = await runStage1(
       ipId,
@@ -35,10 +39,21 @@ export async function runPipeline(
       input.target_market,
       input.social_preferences
     );
+
+    // Ensure characters array exists
+    if (!ipProfile.characters) ipProfile.characters = [];
+    if (!Array.isArray(ipProfile.characters)) {
+      console.error("[Stage1] characters is not an array:", typeof ipProfile.characters);
+      ipProfile.characters = [];
+    }
+
+    // Ensure iconic_scenes array exists
+    if (!ipProfile.iconic_scenes) ipProfile.iconic_scenes = [];
+
     onProgress({
       stage: "stage1",
       status: "complete",
-      message: `IP parsed: ${ipProfile.title}`,
+      message: `IP parsed: ${ipProfile.title || input.ip_name} (${ipProfile.characters.length} characters)`,
     });
   } catch (err) {
     onProgress({
@@ -49,30 +64,34 @@ export async function runPipeline(
     throw err;
   }
 
-  // Check social potential
-  const overallScore = ipProfile.social_potential_score?.overall;
-  if (overallScore && parseFloat(String(overallScore)) < 6) {
-    onProgress({
-      stage: "stage1",
-      status: "complete",
-      message: `Warning: Social potential score ${overallScore}/10 is low`,
-    });
-  }
-
-  // Stage 2: Scene Decomposer
-  onProgress({
-    stage: "stage2",
-    status: "running",
-    message: "Designing interactive scenes...",
-  });
-  let sceneGraph;
+  // ====== Stage 2: Scene Decomposer ======
+  onProgress({ stage: "stage2", status: "running", message: "Designing interactive scenes..." });
+  let sceneGraph: SceneGraph;
   try {
     sceneGraph = await runStage2(ipId, ipProfile);
+
+    // Ensure scenes array exists
+    if (!sceneGraph.scenes) sceneGraph.scenes = [];
+    if (!Array.isArray(sceneGraph.scenes)) {
+      console.error("[Stage2] scenes is not an array:", typeof sceneGraph.scenes);
+      sceneGraph.scenes = [];
+    }
+
+    // Ensure each scene has characters_involved array
+    for (const scene of sceneGraph.scenes) {
+      if (!scene.characters_involved) scene.characters_involved = [];
+    }
+
+    const sceneCount = sceneGraph.scenes.length;
     onProgress({
       stage: "stage2",
       status: "complete",
-      message: `${sceneGraph.total_scenes || sceneGraph.scenes?.length} scenes designed`,
+      message: `${sceneCount} scenes designed`,
     });
+
+    if (sceneCount === 0) {
+      throw new Error("No scenes were generated. The AI may not have enough content to work with.");
+    }
   } catch (err) {
     onProgress({
       stage: "stage2",
@@ -82,66 +101,60 @@ export async function runPipeline(
     throw err;
   }
 
-  // Stage 3: Parallel Generation
-  onProgress({
-    stage: "stage3a",
-    status: "running",
-    message: "Generating character cards...",
-  });
-  onProgress({
-    stage: "stage3b",
-    status: "running",
-    message: "Generating visual scenes...",
-  });
-  onProgress({
-    stage: "stage3c",
-    status: "running",
-    message: "Designing social mechanics...",
-  });
+  // ====== Stage 3: Parallel Generation ======
+  onProgress({ stage: "stage3a", status: "running", message: "Generating character cards..." });
+  onProgress({ stage: "stage3b", status: "running", message: "Generating visual scenes..." });
+  onProgress({ stage: "stage3c", status: "running", message: "Designing social mechanics..." });
 
-  let characterCards, sceneVisuals, socialMechanics;
-  try {
-    [characterCards, sceneVisuals, socialMechanics] = await Promise.all([
-      runStage3A(ipId, ipProfile, sceneGraph).then((result) => {
-        onProgress({
-          stage: "stage3a",
-          status: "complete",
-          message: `${result.length} character cards generated`,
-        });
-        return result;
-      }),
-      runStage3B(ipId, ipProfile, sceneGraph).then((result) => {
-        onProgress({
-          stage: "stage3b",
-          status: "complete",
-          message: `${result.length} visual scenes generated`,
-        });
-        return result;
-      }),
-      runStage3C(ipId, sceneGraph).then((result) => {
-        onProgress({
-          stage: "stage3c",
-          status: "complete",
-          message: "Social mechanics designed",
-        });
-        return result;
-      }),
-    ]);
-  } catch (err) {
-    onProgress({
-      stage: "stage3a",
-      status: "error",
-      message: `Stage 3 failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-    });
-    throw err;
+  let characterCards: CharacterCard[] = [];
+  let sceneVisuals: VisualScene[] = [];
+  let socialMechanics: SocialMechanics = { scenes: [] };
+
+  // Run in parallel but don't let one failure kill the others
+  const results = await Promise.allSettled([
+    runStage3A(ipId, ipProfile, sceneGraph).then((result) => {
+      characterCards = result || [];
+      onProgress({
+        stage: "stage3a",
+        status: "complete",
+        message: `${characterCards.length} character cards generated`,
+      });
+    }),
+    runStage3B(ipId, ipProfile, sceneGraph).then((result) => {
+      sceneVisuals = result || [];
+      onProgress({
+        stage: "stage3b",
+        status: "complete",
+        message: `${sceneVisuals.length} visual scenes generated`,
+      });
+    }),
+    runStage3C(ipId, sceneGraph).then((result) => {
+      socialMechanics = result || { scenes: [] };
+      if (!socialMechanics.scenes) socialMechanics.scenes = [];
+      onProgress({
+        stage: "stage3c",
+        status: "complete",
+        message: "Social mechanics designed",
+      });
+    }),
+  ]);
+
+  // Log failures but continue
+  const stageNames = ["stage3a", "stage3b", "stage3c"];
+  for (let i = 0; i < results.length; i++) {
+    if (results[i].status === "rejected") {
+      const reason = (results[i] as PromiseRejectedResult).reason;
+      console.error(`[${stageNames[i]}] Failed:`, reason);
+      onProgress({
+        stage: stageNames[i],
+        status: "error",
+        message: `Failed: ${reason instanceof Error ? reason.message : "Unknown error"}`,
+      });
+    }
   }
 
-  // Stage 4: Blueprint Assembly
-  onProgress({
-    stage: "stage4",
-    status: "running",
-    message: "Assembling blueprints...",
-  });
+  // ====== Stage 4: Blueprint Assembly ======
+  onProgress({ stage: "stage4", status: "running", message: "Assembling blueprints..." });
   let blueprints;
   try {
     blueprints = await runStage4(
@@ -165,12 +178,8 @@ export async function runPipeline(
     throw err;
   }
 
-  // Stage 5: Runtime Prompts (code-based, no AI)
-  onProgress({
-    stage: "stage5",
-    status: "running",
-    message: "Assembling runtime prompts...",
-  });
+  // ====== Stage 5: Runtime Prompts (code-based, no AI) ======
+  onProgress({ stage: "stage5", status: "running", message: "Assembling runtime prompts..." });
   try {
     await runStage5(ipId, sceneGraph.scenes, blueprints, characterCards);
     onProgress({
@@ -184,23 +193,13 @@ export async function runPipeline(
       status: "error",
       message: `Stage 5 failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     });
-    throw err;
+    // Non-fatal, continue
   }
 
-  // Stage 6: Share Templates
-  onProgress({
-    stage: "stage6",
-    status: "running",
-    message: "Generating share templates...",
-  });
+  // ====== Stage 6: Share Templates ======
+  onProgress({ stage: "stage6", status: "running", message: "Generating share templates..." });
   try {
-    await runStage6(
-      ipId,
-      ipProfile,
-      sceneGraph,
-      sceneVisuals,
-      socialMechanics
-    );
+    await runStage6(ipId, ipProfile, sceneGraph, sceneVisuals, socialMechanics);
     onProgress({
       stage: "stage6",
       status: "complete",
@@ -212,7 +211,7 @@ export async function runPipeline(
       status: "error",
       message: `Stage 6 failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     });
-    throw err;
+    // Non-fatal, continue
   }
 
   // Done

@@ -49,21 +49,35 @@ export async function callAI({
       });
 
       if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`OpenRouter ${res.status}: ${err}`);
+        const errText = await res.text();
+        throw new Error(`OpenRouter ${res.status}: ${errText}`);
       }
 
       const data = await res.json();
+
+      // Handle OpenRouter error responses
+      if (data.error) {
+        throw new Error(
+          `OpenRouter API error: ${data.error.message || JSON.stringify(data.error)}`
+        );
+      }
+
       const content = data.choices?.[0]?.message?.content;
 
-      if (!content) throw new Error("Empty response from model");
+      if (!content) {
+        console.error("OpenRouter response has no content:", JSON.stringify(data).slice(0, 500));
+        throw new Error("Empty response from model");
+      }
 
       if (jsonMode) {
-        return safeParseJSON(content);
+        const parsed = safeParseJSON(content);
+        console.log("[callAI] Parsed response keys:", Object.keys(parsed as Record<string, unknown>).join(", "));
+        return parsed;
       }
 
       return content;
     } catch (err) {
+      console.error(`[callAI] Attempt ${attempt + 1}/${retries + 1} failed:`, err instanceof Error ? err.message : err);
       if (attempt === retries) throw err;
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
     }
@@ -115,6 +129,13 @@ export async function chatCompletion({
   }
 
   const data = await res.json();
+
+  if (data.error) {
+    throw new Error(
+      `OpenRouter API error: ${data.error.message || JSON.stringify(data.error)}`
+    );
+  }
+
   const content = data.choices?.[0]?.message?.content;
 
   if (!content) throw new Error("Empty response from model");
