@@ -24,6 +24,9 @@ export default function PipelinePage() {
   const [running, setRunning] = useState(false);
   const [stages, setStages] = useState<StageState[]>([]);
   const [completedIpId, setCompletedIpId] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string>("");
+  const [fileLoading, setFileLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const togglePreference = (pref: string) => {
@@ -33,6 +36,33 @@ export default function PipelinePage() {
         : [...prev, pref]
     );
   };
+
+  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setFileLoading(true);
+    setFileName(file.name);
+
+    try {
+      const text = await file.text();
+      setNovelText(text);
+
+      // Auto-fill IP name from filename if empty
+      if (!ipName) {
+        const name = file.name
+          .replace(/\.(txt|md|text|novel|epub)$/i, "")
+          .replace(/[_-]/g, " ")
+          .trim();
+        if (name) setIpName(name);
+      }
+    } catch (err) {
+      console.error("Failed to read file:", err);
+      alert("Failed to read file. Please try a .txt or .md file.");
+    } finally {
+      setFileLoading(false);
+    }
+  }, [ipName]);
 
   const runPipeline = useCallback(async () => {
     if (!ipName.trim() || !novelText.trim()) return;
@@ -211,11 +241,60 @@ export default function PipelinePage() {
             <label className="block text-sm font-medium text-gray-300 mb-1">
               Novel Text / Synopsis
             </label>
+
+            {/* File upload area */}
+            <div
+              onClick={() => !running && fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const file = e.dataTransfer.files[0];
+                if (file && fileInputRef.current) {
+                  const dt = new DataTransfer();
+                  dt.items.add(file);
+                  fileInputRef.current.files = dt.files;
+                  fileInputRef.current.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+              }}
+              className={`mb-2 p-4 border-2 border-dashed rounded-lg text-center cursor-pointer transition-colors ${
+                running
+                  ? "border-gray-700 text-gray-600 cursor-not-allowed"
+                  : "border-[var(--border)] text-gray-400 hover:border-indigo-500/50 hover:text-indigo-400"
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.md,.text,.novel"
+                onChange={handleFileUpload}
+                className="hidden"
+                disabled={running}
+              />
+              {fileLoading ? (
+                <div className="flex items-center justify-center gap-2">
+                  <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                  <span>Reading file...</span>
+                </div>
+              ) : fileName ? (
+                <div>
+                  <p className="text-indigo-400 font-medium">{fileName}</p>
+                  <p className="text-xs text-gray-500 mt-1">Click to choose a different file</p>
+                </div>
+              ) : (
+                <div>
+                  <p className="font-medium">Click to upload or drag & drop</p>
+                  <p className="text-xs mt-1">Supports .txt, .md files</p>
+                </div>
+              )}
+            </div>
+
+            {/* Text area for paste or edit */}
             <textarea
               value={novelText}
               onChange={(e) => setNovelText(e.target.value)}
-              placeholder="Paste the novel text, synopsis, or detailed description here..."
-              className="w-full h-64 px-3 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none font-mono text-sm"
+              placeholder="Or paste the novel text, synopsis, or detailed description here..."
+              className="w-full h-48 px-3 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none font-mono text-sm"
               disabled={running}
             />
             <p className="text-xs text-gray-500 mt-1">
