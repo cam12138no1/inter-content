@@ -38,24 +38,22 @@ export default function PipelinePage() {
   };
 
   const extractPDFText = useCallback(async (file: File): Promise<string> => {
-    const pdfjsLib = await import("pdfjs-dist");
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+    // Use the server-side API to parse PDF
+    const formData = new FormData();
+    formData.append("file", file);
 
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const textParts: string[] = [];
+    const res = await fetch("/api/parse-pdf", {
+      method: "POST",
+      body: formData,
+    });
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      const pageText = content.items
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((item: any) => item.str || "")
-        .join(" ");
-      textParts.push(pageText);
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || "PDF parsing failed");
     }
 
-    return textParts.join("\n\n");
+    const data = await res.json();
+    return data.text;
   }, []);
 
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -84,7 +82,8 @@ export default function PipelinePage() {
       }
     } catch (err) {
       console.error("Failed to read file:", err);
-      alert("Failed to read file. Please check the file format and try again.");
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      alert(`Failed to read file: ${msg}\n\nPlease try a .txt or .md file, or a text-based PDF.`);
     } finally {
       setFileLoading(false);
     }
