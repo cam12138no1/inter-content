@@ -37,6 +37,27 @@ export default function PipelinePage() {
     );
   };
 
+  const extractPDFText = useCallback(async (file: File): Promise<string> => {
+    const pdfjsLib = await import("pdfjs-dist");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const textParts: string[] = [];
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((item: any) => item.str || "")
+        .join(" ");
+      textParts.push(pageText);
+    }
+
+    return textParts.join("\n\n");
+  }, []);
+
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -45,24 +66,29 @@ export default function PipelinePage() {
     setFileName(file.name);
 
     try {
-      const text = await file.text();
+      let text: string;
+      if (file.name.toLowerCase().endsWith(".pdf")) {
+        text = await extractPDFText(file);
+      } else {
+        text = await file.text();
+      }
       setNovelText(text);
 
       // Auto-fill IP name from filename if empty
       if (!ipName) {
         const name = file.name
-          .replace(/\.(txt|md|text|novel|epub)$/i, "")
+          .replace(/\.(txt|md|text|novel|pdf)$/i, "")
           .replace(/[_-]/g, " ")
           .trim();
         if (name) setIpName(name);
       }
     } catch (err) {
       console.error("Failed to read file:", err);
-      alert("Failed to read file. Please try a .txt or .md file.");
+      alert("Failed to read file. Please check the file format and try again.");
     } finally {
       setFileLoading(false);
     }
-  }, [ipName]);
+  }, [ipName, extractPDFText]);
 
   const runPipeline = useCallback(async () => {
     if (!ipName.trim() || !novelText.trim()) return;
@@ -266,7 +292,7 @@ export default function PipelinePage() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".txt,.md,.text,.novel"
+                accept=".txt,.md,.text,.novel,.pdf"
                 onChange={handleFileUpload}
                 className="hidden"
                 disabled={running}
@@ -284,7 +310,7 @@ export default function PipelinePage() {
               ) : (
                 <div>
                   <p className="font-medium">Click to upload or drag & drop</p>
-                  <p className="text-xs mt-1">Supports .txt, .md files</p>
+                  <p className="text-xs mt-1">Supports .txt, .md, .pdf files</p>
                 </div>
               )}
             </div>
