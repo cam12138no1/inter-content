@@ -13,6 +13,10 @@ interface StageState {
   message: string;
 }
 
+// Client-side truncation limit — AI models have context limits,
+// and Vercel has a 4.5MB body limit. 100k chars ≈ 100KB JSON ≈ safe.
+const MAX_TEXT_FOR_API = 100000;
+
 export default function PipelinePage() {
   const [ipName, setIpName] = useState("");
   const [novelText, setNovelText] = useState("");
@@ -26,6 +30,7 @@ export default function PipelinePage() {
   const [completedIpId, setCompletedIpId] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("");
   const [fileLoading, setFileLoading] = useState(false);
+  const [truncatedInfo, setTruncatedInfo] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -37,39 +42,94 @@ export default function PipelinePage() {
     );
   };
 
-  const extractPDFText = useCallback(async (file: File): Promise<string> => {
-    // Use the server-side API to parse PDF
-    const formData = new FormData();
-    formData.append("file", file);
+  // ---- Client-side PDF text extraction ----
+  const extractPDFTextClientSide = useCallback(async (file: File): Promise<string> => {
+    setFileLoading(true);
 
-    const res = await fetch("/api/parse-pdf", {
-      method: "POST",
-      body: formData,
-    });
+    try {
+      // Dynamic import pdf.js
+      const pdfjsLib = await import("pdfjs-dist");
 
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || "PDF parsing failed");
+      // Set worker from CDN matching the installed version
+      if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+          `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+      }
+
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({
+        data: new Uint8Array(arrayBuffer),
+      }).promise;
+
+      const textParts: string[] = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pageText = content.items
+          .map((item: unknown) => {
+            const rec = item as Record<string, unknown>;
+            return (rec.str as string) || "";
+          })
+          .join(" ");
+        if (pageText.trim()) textParts.push(pageText);
+      }
+
+      const fullText = textParts.join("\n\n");
+      if (!fullText.trim()) {
+        throw new Error("No text extracted — the PDF may be image-based (scanned). Try a text-based PDF or .txt file.");
+      }
+      return fullText;
+    } catch (clientErr) {
+      console.warn("Client-side PDF parsing failed, trying server fallback:", clientErr);
+
+      // Fallback: try server-side parsing (only works for files < 4.5MB)
+      if (file.size < 4 * 1024 * 1024) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/parse-pdf", { method: "POST", body: formData });
+        if (res.ok) {
+          const data = await res.json();
+          return data.text;
+        }
+      }
+
+      throw clientErr;
     }
-
-    const data = await res.json();
-    return data.text;
   }, []);
 
+  // ---- File upload handler ----
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Check file size (50MB max)
+    if (file.size > 50 * 1024 * 1024) {
+      alert("File is too large. Maximum supported size is 50MB.");
+      return;
+    }
+
     setFileLoading(true);
     setFileName(file.name);
+    setTruncatedInfo("");
 
     try {
       let text: string;
+
       if (file.name.toLowerCase().endsWith(".pdf")) {
-        text = await extractPDFText(file);
+        text = await extractPDFTextClientSide(file);
       } else {
+        // txt, md, etc. — read directly in browser
         text = await file.text();
       }
+
+      // Show warning if text will be truncated
+      if (text.length > MAX_TEXT_FOR_API) {
+        setTruncatedInfo(
+          `Original: ${(text.length / 1000).toFixed(0)}k chars. Will send first ${(MAX_TEXT_FOR_API / 1000).toFixed(0)}k chars to AI (model context limit).`
+        );
+      }
+
       setNovelText(text);
 
       // Auto-fill IP name from filename if empty
@@ -83,12 +143,13 @@ export default function PipelinePage() {
     } catch (err) {
       console.error("Failed to read file:", err);
       const msg = err instanceof Error ? err.message : "Unknown error";
-      alert(`Failed to read file: ${msg}\n\nPlease try a .txt or .md file, or a text-based PDF.`);
+      alert(`Failed to read file: ${msg}`);
     } finally {
       setFileLoading(false);
     }
-  }, [ipName, extractPDFText]);
+  }, [ipName, extractPDFTextClientSide]);
 
+  // ---- Run pipeline ----
   const runPipeline = useCallback(async () => {
     if (!ipName.trim() || !novelText.trim()) return;
 
@@ -104,12 +165,19 @@ export default function PipelinePage() {
 
     abortRef.current = new AbortController();
 
+    // Truncate text client-side to stay within Vercel's 4.5MB body limit
+    let textToSend = novelText;
+    if (textToSend.length > MAX_TEXT_FOR_API) {
+      textToSend = textToSend.slice(0, MAX_TEXT_FOR_API) +
+        "\n\n[... remaining text omitted — first 100k characters provided ...]";
+    }
+
     try {
       const res = await fetch("/api/pipeline/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          novel_text: novelText,
+          novel_text: textToSend,
           ip_name: ipName,
           target_market: targetMarket,
           social_preferences: socialPreferences,
@@ -141,12 +209,10 @@ export default function PipelinePage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        // Split on double newlines (SSE event boundary)
         const events = buffer.split("\n\n");
         buffer = events.pop() || "";
 
         for (const event of events) {
-          // Find the data line(s) in this event
           const dataLines = event
             .split("\n")
             .filter((line) => line.startsWith("data: "))
@@ -156,29 +222,18 @@ export default function PipelinePage() {
             try {
               const data = JSON.parse(dataStr);
 
-              // Update the matching stage
               setStages((prev) =>
                 prev.map((s) =>
                   s.id === data.stage
-                    ? {
-                        ...s,
-                        status: data.status,
-                        message: data.message,
-                      }
+                    ? { ...s, status: data.status, message: data.message }
                     : s
                 )
               );
 
-              // Handle pipeline completion
-              if (
-                data.stage === "done" &&
-                data.status === "complete" &&
-                data.data?.ipId
-              ) {
+              if (data.stage === "done" && data.status === "complete" && data.data?.ipId) {
                 setCompletedIpId(data.data.ipId);
               }
 
-              // Handle pipeline-level error
               if (data.stage === "error" && data.status === "error") {
                 setStages((prev) =>
                   prev.map((s) =>
@@ -195,11 +250,8 @@ export default function PipelinePage() {
         }
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return;
-      }
+      if (err instanceof DOMException && err.name === "AbortError") return;
       console.error("Pipeline error:", err);
-      // Mark any running stages as error
       setStages((prev) =>
         prev.map((s) =>
           s.status === "running"
@@ -212,29 +264,22 @@ export default function PipelinePage() {
     }
   }, [ipName, novelText, targetMarket, socialPreferences]);
 
+  // ---- UI Helpers ----
   const statusIcon = (status: StageStatus) => {
     switch (status) {
-      case "pending":
-        return "○";
-      case "running":
-        return "◉";
-      case "complete":
-        return "●";
-      case "error":
-        return "✕";
+      case "pending": return "○";
+      case "running": return "◉";
+      case "complete": return "●";
+      case "error": return "✕";
     }
   };
 
   const statusColor = (status: StageStatus) => {
     switch (status) {
-      case "pending":
-        return "text-gray-600";
-      case "running":
-        return "text-indigo-400";
-      case "complete":
-        return "text-green-400";
-      case "error":
-        return "text-red-400";
+      case "pending": return "text-gray-600";
+      case "running": return "text-indigo-400";
+      case "complete": return "text-green-400";
+      case "error": return "text-red-400";
     }
   };
 
@@ -282,12 +327,7 @@ export default function PipelinePage() {
               Social Scene Preferences
             </label>
             <div className="flex flex-wrap gap-2">
-              {[
-                "identity_test",
-                "challenge",
-                "confession",
-                "friend_comparison",
-              ].map((pref) => (
+              {["identity_test", "challenge", "confession", "friend_comparison"].map((pref) => (
                 <button
                   key={pref}
                   onClick={() => togglePreference(pref)}
@@ -316,6 +356,7 @@ export default function PipelinePage() {
               onDrop={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (running) return;
                 const file = e.dataTransfer.files[0];
                 if (file && fileInputRef.current) {
                   const dt = new DataTransfer();
@@ -351,21 +392,36 @@ export default function PipelinePage() {
               ) : (
                 <div>
                   <p className="font-medium">Click to upload or drag & drop</p>
-                  <p className="text-xs mt-1">Supports .txt, .md, .pdf files</p>
+                  <p className="text-xs mt-1">Supports .txt, .md, .pdf (up to 50MB)</p>
                 </div>
               )}
             </div>
 
+            {/* Truncation warning */}
+            {truncatedInfo && (
+              <div className="mb-2 p-2 bg-yellow-900/20 border border-yellow-600/30 rounded-lg">
+                <p className="text-xs text-yellow-400">{truncatedInfo}</p>
+              </div>
+            )}
+
             {/* Text area for paste or edit */}
             <textarea
               value={novelText}
-              onChange={(e) => setNovelText(e.target.value)}
+              onChange={(e) => {
+                setNovelText(e.target.value);
+                setTruncatedInfo("");
+              }}
               placeholder="Or paste the novel text, synopsis, or detailed description here..."
               className="w-full h-48 px-3 py-2 bg-[var(--surface)] border border-[var(--border)] rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-none font-mono text-sm"
               disabled={running}
             />
             <p className="text-xs text-gray-500 mt-1">
               {novelText.length.toLocaleString()} characters
+              {novelText.length > MAX_TEXT_FOR_API && (
+                <span className="text-yellow-400">
+                  {" "}(will send first {(MAX_TEXT_FOR_API / 1000).toFixed(0)}k to AI)
+                </span>
+              )}
             </p>
           </div>
 
@@ -402,15 +458,11 @@ export default function PipelinePage() {
                   }`}
                 >
                   <div className="flex items-center gap-2">
-                    <span
-                      className={`text-lg ${statusColor(stage.status)}`}
-                    >
+                    <span className={`text-lg ${statusColor(stage.status)}`}>
                       {statusIcon(stage.status)}
                     </span>
                     <div className="flex-1">
-                      <div className="text-sm font-medium text-white">
-                        {stage.name}
-                      </div>
+                      <div className="text-sm font-medium text-white">{stage.name}</div>
                       <div className="text-xs text-gray-500">
                         {stage.message || stage.description}
                       </div>
@@ -424,9 +476,7 @@ export default function PipelinePage() {
 
               {completedIpId && (
                 <div className="mt-4 p-4 bg-green-900/20 border border-green-500/30 rounded-lg">
-                  <p className="text-green-400 font-medium">
-                    Pipeline Complete!
-                  </p>
+                  <p className="text-green-400 font-medium">Pipeline Complete!</p>
                   <div className="flex gap-2 mt-2">
                     <a
                       href={`/admin/data/${completedIpId}`}
