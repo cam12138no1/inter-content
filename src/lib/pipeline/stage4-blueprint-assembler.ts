@@ -8,7 +8,37 @@ import type {
   VisualScene,
   SocialMechanics,
   Blueprint,
+  Scene,
 } from "@/types";
+
+function makeFallbackBlueprint(scene: Scene): Blueprint {
+  return {
+    scene_id: scene.scene_id,
+    tier: scene.tier,
+    scene_type: scene.scene_type || "identity_test",
+    duration: scene.duration || "3 min",
+    estimated_token_cost_per_play: "0",
+    frontend_spec: {
+      layout: scene.tier === 1 ? "card_swipe" : "chat_ui",
+      entry_animation: "fade_in",
+      background_image_ref: "",
+      accent_color: "#6366f1",
+    },
+    interaction_sequence: [],
+    state_machine: {
+      variables: {},
+      update_rules: [],
+      result_computation: { method: "direct_map", logic: "" },
+      exit_conditions: [],
+    },
+    social_integration: {
+      share_card_template_ref: "",
+      leaderboard_metric: "",
+      friend_comparison_fields: [],
+      viral_entry_behavior: "",
+    },
+  };
+}
 
 export async function runStage4(
   ipId: string,
@@ -18,19 +48,19 @@ export async function runStage4(
   socialMechanics: SocialMechanics
 ): Promise<Blueprint[]> {
   const scenes = sceneGraph.scenes || [];
-  const blueprints: Blueprint[] = [];
 
-  // Build lookup maps by scene_id (not array index!)
+  // Build lookup maps by scene_id
   const visualsMap = new Map<string, VisualScene>();
   for (const v of sceneVisuals || []) {
     if (v?.scene_id) visualsMap.set(v.scene_id, v);
   }
-  const socialMap = new Map<string, typeof socialMechanics.scenes[0]>();
+  const socialMap = new Map<string, (typeof socialMechanics.scenes)[0]>();
   for (const s of socialMechanics?.scenes || []) {
     if (s?.scene_id) socialMap.set(s.scene_id, s);
   }
 
-  for (const scene of scenes) {
+  // Run ALL scenes in parallel (not sequential!) to avoid timeout
+  const blueprintPromises = scenes.map(async (scene) => {
     try {
       const chars = (characterCards || []).filter((c) =>
         (scene.characters_involved || []).includes(c.char_id)
@@ -82,39 +112,14 @@ export async function runStage4(
       }
 
       await writeJSON(ipId, `blueprints/${scene.scene_id}_blueprint.json`, blueprint);
-      blueprints.push(blueprint);
+      return blueprint;
     } catch (err) {
       console.error(`[Stage4] Failed for scene ${scene.scene_id}:`, err);
-      const fallback: Blueprint = {
-        scene_id: scene.scene_id,
-        tier: scene.tier,
-        scene_type: scene.scene_type || "identity_test",
-        duration: scene.duration || "3 min",
-        estimated_token_cost_per_play: "0",
-        frontend_spec: {
-          layout: scene.tier === 1 ? "card_swipe" : "chat_ui",
-          entry_animation: "fade_in",
-          background_image_ref: "",
-          accent_color: "#6366f1",
-        },
-        interaction_sequence: [],
-        state_machine: {
-          variables: {},
-          update_rules: [],
-          result_computation: { method: "direct_map", logic: "" },
-          exit_conditions: [],
-        },
-        social_integration: {
-          share_card_template_ref: "",
-          leaderboard_metric: "",
-          friend_comparison_fields: [],
-          viral_entry_behavior: "",
-        },
-      };
+      const fallback = makeFallbackBlueprint(scene);
       await writeJSON(ipId, `blueprints/${scene.scene_id}_blueprint.json`, fallback);
-      blueprints.push(fallback);
+      return fallback;
     }
-  }
+  });
 
-  return blueprints;
+  return Promise.all(blueprintPromises);
 }

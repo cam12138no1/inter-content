@@ -12,7 +12,7 @@ export async function runStage2(
     systemPrompt: STAGE_2_SYSTEM_PROMPT,
     userMessage: JSON.stringify(ipProfile),
     ...MODEL_CONFIG.pipeline,
-    maxTokens: 12000,
+    maxTokens: 4096,
     jsonMode: true,
   });
 

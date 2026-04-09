@@ -5,7 +5,8 @@ import { writeJSON } from "../data/storage";
 import type { IPProfile } from "@/types";
 
 // Truncate novel text to avoid exceeding context limits (~120k chars ≈ ~30k tokens)
-const MAX_NOVEL_CHARS = 120000;
+// ~50k chars ≈ ~12k tokens, well within model limits and keeps API fast
+const MAX_NOVEL_CHARS = 50000;
 
 export async function runStage1(
   ipId: string,

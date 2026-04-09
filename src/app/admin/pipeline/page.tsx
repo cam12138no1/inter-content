@@ -13,9 +13,10 @@ interface StageState {
   message: string;
 }
 
-// Client-side truncation limit — AI models have context limits,
-// and Vercel has a 4.5MB body limit. 100k chars ≈ 100KB JSON ≈ safe.
-const MAX_TEXT_FOR_API = 100000;
+// Client-side truncation limit.
+// AI models work best with focused content (~50k chars ≈ 12k tokens).
+// Also keeps well within Vercel's 4.5MB body limit.
+const MAX_TEXT_FOR_API = 50000;
 
 export default function PipelinePage() {
   const [ipName, setIpName] = useState("");

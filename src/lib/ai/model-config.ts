@@ -2,7 +2,7 @@ export const MODEL_CONFIG = {
   // Pipeline generation stages — strong logic and long output
   pipeline: {
     model: "anthropic/claude-sonnet-4",
-    maxTokens: 8192,
+    maxTokens: 4096,
     temperature: 0.6,
   },
 
