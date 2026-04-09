@@ -36,6 +36,10 @@ yarn-error.log*
 # pipeline data output
 /data/
 
+# novel/text files (user uploads)
+*.txt
+*.novel
+
 # vercel
 .vercel
 
