@@ -22,10 +22,12 @@ export async function callAI({
   retries = 2,
 }: CallAIOptions): Promise<unknown> {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY not set");
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY not set. Add it in Vercel project settings → Environment Variables.");
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      console.log(`[callAI] Attempt ${attempt + 1}, model=${model}, maxTokens=${maxTokens}`);
+
       const res = await fetch(OPENROUTER_BASE, {
         method: "POST",
         headers: {
@@ -50,36 +52,51 @@ export async function callAI({
 
       if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`OpenRouter ${res.status}: ${errText}`);
+        console.error(`[callAI] HTTP ${res.status}:`, errText.slice(0, 500));
+        throw new Error(`OpenRouter HTTP ${res.status}: ${errText.slice(0, 200)}`);
       }
 
       const data = await res.json();
 
       // Handle OpenRouter error responses
       if (data.error) {
-        throw new Error(
-          `OpenRouter API error: ${data.error.message || JSON.stringify(data.error)}`
-        );
+        const errMsg = typeof data.error === "string"
+          ? data.error
+          : data.error.message || JSON.stringify(data.error);
+        console.error(`[callAI] API error:`, errMsg);
+        throw new Error(`OpenRouter API error: ${errMsg}`);
       }
 
       const content = data.choices?.[0]?.message?.content;
 
       if (!content) {
-        console.error("OpenRouter response has no content:", JSON.stringify(data).slice(0, 500));
+        console.error("[callAI] No content in response. Full response:", JSON.stringify(data).slice(0, 500));
         throw new Error("Empty response from model");
       }
 
+      console.log(`[callAI] Got response, length=${content.length}`);
+
       if (jsonMode) {
-        const parsed = safeParseJSON(content);
-        console.log("[callAI] Parsed response keys:", Object.keys(parsed as Record<string, unknown>).join(", "));
-        return parsed;
+        try {
+          const parsed = safeParseJSON(content);
+          const keys = typeof parsed === "object" && parsed !== null
+            ? Object.keys(parsed).slice(0, 10).join(", ")
+            : typeof parsed;
+          console.log(`[callAI] Parsed JSON keys: ${keys}`);
+          return parsed;
+        } catch (parseErr) {
+          console.error("[callAI] JSON parse failed. Raw content:", content.slice(0, 300));
+          throw parseErr;
+        }
       }
 
       return content;
     } catch (err) {
       console.error(`[callAI] Attempt ${attempt + 1}/${retries + 1} failed:`, err instanceof Error ? err.message : err);
       if (attempt === retries) throw err;
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      const delay = 1000 * (attempt + 1);
+      console.log(`[callAI] Retrying in ${delay}ms...`);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
 
@@ -125,7 +142,7 @@ export async function chatCompletion({
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`OpenRouter ${res.status}: ${err}`);
+    throw new Error(`OpenRouter ${res.status}: ${err.slice(0, 200)}`);
   }
 
   const data = await res.json();
@@ -137,7 +154,6 @@ export async function chatCompletion({
   }
 
   const content = data.choices?.[0]?.message?.content;
-
   if (!content) throw new Error("Empty response from model");
 
   if (jsonMode) {

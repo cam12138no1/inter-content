@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chatCompletion } from "@/lib/ai/openrouter-client";
-import { readText, readJSON } from "@/lib/data/storage";
+import { readText, readJSON, fileExists } from "@/lib/data/storage";
 import { MODEL_CONFIG } from "@/lib/ai/model-config";
 import type { Blueprint, ChatRequest, AIResponse, GameState } from "@/types";
 
@@ -24,31 +24,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 1. Load runtime prompt
-    const systemPrompt = await readText(
-      ip_id,
-      `runtime/${scene_id}_system_prompt.txt`
-    );
-
-    // 2. Load blueprint for tier config
+    // 1. Load blueprint for tier config
+    const bpExists = await fileExists(ip_id, `blueprints/${scene_id}_blueprint.json`);
+    if (!bpExists) {
+      return NextResponse.json(
+        { error: `Blueprint not found for scene: ${scene_id}` },
+        { status: 404 }
+      );
+    }
     const blueprint = await readJSON<Blueprint>(
       ip_id,
       `blueprints/${scene_id}_blueprint.json`
     );
 
+    // 2. Load runtime prompt (may not exist for Tier 1 scenes)
+    let systemPrompt: string;
+    const promptExists = await fileExists(ip_id, `runtime/${scene_id}_system_prompt.txt`);
+    if (promptExists) {
+      systemPrompt = await readText(ip_id, `runtime/${scene_id}_system_prompt.txt`);
+    } else {
+      // Fallback: generate a basic prompt
+      systemPrompt = `你是一个互动故事角色。请用JSON格式回复。
+【JSON输出格式】{"reply":"你的回复","suggested_responses":["选项1","选项2","选项3"],"emotion":"neutral","trust_delta":0,"turn":${(current_state?.turn || 0) + 1},"is_final":false,"image_hint":null}
+【规则】每次回复不超过100字，只输出JSON`;
+    }
+
     // 3. Inject current state
-    const stateInjection = `\n\n【当前状态】trust=${current_state.trust}, turn=${current_state.turn}`;
+    const stateInjection = `\n\n【当前状态】trust=${current_state?.trust || 0}, turn=${current_state?.turn || 0}`;
     const fullSystemPrompt = systemPrompt + stateInjection;
 
     // 4. Build messages
     const messages = [
       { role: "system", content: fullSystemPrompt },
-      ...conversation_history,
+      ...(conversation_history || []),
       { role: "user", content: user_message },
     ];
 
     // 5. Select model config
-    const tier = blueprint.tier;
+    const tier = blueprint.tier || 1.5;
     const modelCfg =
       tier === 2
         ? MODEL_CONFIG.runtime_tier2
@@ -63,15 +76,23 @@ export async function POST(request: NextRequest) {
       jsonMode: true,
     })) as AIResponse;
 
+    // Normalize response
+    if (!aiResponse.reply) aiResponse.reply = "";
+    if (!aiResponse.suggested_responses) aiResponse.suggested_responses = [];
+    if (!aiResponse.emotion) aiResponse.emotion = "neutral";
+    if (aiResponse.trust_delta === undefined) aiResponse.trust_delta = 0;
+    if (aiResponse.turn === undefined) aiResponse.turn = (current_state?.turn || 0) + 1;
+    if (aiResponse.is_final === undefined) aiResponse.is_final = false;
+
     // 7. Update state
     const newState: GameState = {
       ...current_state,
       trust:
-        (current_state.trust as number) + (aiResponse.trust_delta || 0),
+        ((current_state?.trust as number) || 0) + (aiResponse.trust_delta || 0),
       suspicion:
-        (current_state.suspicion as number) +
+        ((current_state?.suspicion as number) || 0) +
         (aiResponse.suspicion_delta || 0),
-      turn: (current_state.turn as number) + 1,
+      turn: ((current_state?.turn as number) || 0) + 1,
     };
 
     // 8. Check exit conditions
@@ -107,8 +128,6 @@ function evaluateCondition(
   state: GameState
 ): boolean {
   try {
-    // Simple condition evaluator for common patterns
-    // e.g., "turn >= 5", "trust >= 4", "trust <= -3"
     const match = condition.match(
       /(\w+)\s*(>=|<=|===|==|>|<|!=)\s*(-?\d+)/
     );

@@ -117,6 +117,19 @@ export default function PipelinePage() {
         signal: abortRef.current.signal,
       });
 
+      // Check for non-streaming error responses
+      if (!res.ok) {
+        const errText = await res.text();
+        setStages((prev) =>
+          prev.map((s, i) =>
+            i === 0
+              ? { ...s, status: "error" as StageStatus, message: `HTTP ${res.status}: ${errText.slice(0, 200)}` }
+              : s
+          )
+        );
+        return;
+      }
+
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
 
@@ -128,13 +141,22 @@ export default function PipelinePage() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
+        // Split on double newlines (SSE event boundary)
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
+        for (const event of events) {
+          // Find the data line(s) in this event
+          const dataLines = event
+            .split("\n")
+            .filter((line) => line.startsWith("data: "))
+            .map((line) => line.slice(6));
+
+          for (const dataStr of dataLines) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const data = JSON.parse(dataStr);
+
+              // Update the matching stage
               setStages((prev) =>
                 prev.map((s) =>
                   s.id === data.stage
@@ -147,6 +169,7 @@ export default function PipelinePage() {
                 )
               );
 
+              // Handle pipeline completion
               if (
                 data.stage === "done" &&
                 data.status === "complete" &&
@@ -154,8 +177,19 @@ export default function PipelinePage() {
               ) {
                 setCompletedIpId(data.data.ipId);
               }
+
+              // Handle pipeline-level error
+              if (data.stage === "error" && data.status === "error") {
+                setStages((prev) =>
+                  prev.map((s) =>
+                    s.status === "running"
+                      ? { ...s, status: "error" as StageStatus, message: data.message }
+                      : s
+                  )
+                );
+              }
             } catch {
-              // skip malformed events
+              console.warn("Skipping malformed SSE data:", dataStr.slice(0, 100));
             }
           }
         }
@@ -165,6 +199,14 @@ export default function PipelinePage() {
         return;
       }
       console.error("Pipeline error:", err);
+      // Mark any running stages as error
+      setStages((prev) =>
+        prev.map((s) =>
+          s.status === "running"
+            ? { ...s, status: "error" as StageStatus, message: err instanceof Error ? err.message : "Connection lost" }
+            : s
+        )
+      );
     } finally {
       setRunning(false);
     }
